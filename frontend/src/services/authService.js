@@ -9,6 +9,7 @@
  */
 
 import { MOCK_PATIENT, MOCK_HOSPITALS, MOCK_ACCOUNTS } from '../data/mockData';
+import { supabase, isSupabaseConfigured } from './supabaseClient';
 
 export const ROLES = {
   PATIENT: 'patient',
@@ -147,7 +148,7 @@ export function clearActiveRoleSession() {
 }
 
 // -------------------------------------------------------------
-// Shared Workflow State Persistence (Cross-Portal Sync)
+// Shared Workflow State Persistence (Cross-Portal & Cloud Sync)
 // -------------------------------------------------------------
 
 export function getPendingClaims() {
@@ -165,10 +166,73 @@ export function savePendingClaims(claims) {
   localStorage.setItem(STORAGE_KEYS.PENDING_CLAIMS, JSON.stringify(claims));
 }
 
+export async function fetchPendingClaimsFromCloud() {
+  if (typeof window === 'undefined') return [];
+  if (!isSupabaseConfigured() || !supabase) return getPendingClaims();
+
+  try {
+    const { data, error } = await supabase
+      .from('claims')
+      .select('*')
+      .eq('status', 'PENDING')
+      .order('created_at', { ascending: false });
+
+    if (!error && data && data.length > 0) {
+      const mapped = data.map((c) => ({
+        id: c.id,
+        hospitalName: c.hospital_name,
+        hospitalLicense: c.hospital_license,
+        hospitalAddress: c.hospital_address,
+        payee: c.hospital_address,
+        amountEth: parseFloat(c.amount_eth),
+        amountInr: c.amount_inr,
+        nullifier: c.nullifier,
+        recordHash: c.patient_record_hash,
+        treatmentCategory: c.treatment_category,
+        diagnosisCode: c.diagnosis_code,
+        status: 'PENDING',
+        submittedAt: c.created_at,
+      }));
+      const local = getPendingClaims();
+      const ids = new Set(mapped.map((m) => m.id));
+      const combined = [...mapped, ...local.filter((l) => !ids.has(l.id))];
+      savePendingClaims(combined);
+      return combined;
+    }
+  } catch (err) {
+    console.warn('[Parda] Could not fetch claims from Supabase:', err);
+  }
+  return getPendingClaims();
+}
+
 export function addPendingClaim(claim) {
   const existing = getPendingClaims();
   const updated = [claim, ...existing.filter((c) => c.id !== claim.id)];
   savePendingClaims(updated);
+
+  // Background sync to Supabase Cloud so other laptops immediately see the claim
+  if (isSupabaseConfigured() && supabase) {
+    supabase
+      .from('claims')
+      .upsert({
+        id: claim.id,
+        hospital_name: claim.hospitalName || 'St. Jude Medical Center',
+        hospital_license: claim.hospitalLicense || 'LIC-NY-2024-8849',
+        hospital_address: claim.hospitalAddress || claim.payee || '',
+        amount_eth: parseFloat(claim.amountEth) || 1.5,
+        amount_inr: claim.amountInr || Math.round((parseFloat(claim.amountEth) || 1.5) * 10000),
+        nullifier: claim.nullifier,
+        patient_record_hash: claim.recordHash || '',
+        treatment_category: claim.treatmentCategory || 'General Inpatient',
+        diagnosis_code: claim.diagnosisCode || 'Z00.00',
+        status: 'PENDING',
+      })
+      .then(({ error }) => {
+        if (error) console.info('[Parda] Supabase claims sync:', error.message);
+      })
+      .catch(() => {});
+  }
+
   return updated;
 }
 
@@ -205,10 +269,59 @@ export function saveSettledClaims(claims) {
   localStorage.setItem(STORAGE_KEYS.SETTLED_CLAIMS, JSON.stringify(claims));
 }
 
+export async function fetchSettledClaimsFromCloud() {
+  if (typeof window === 'undefined') return [];
+  if (!isSupabaseConfigured() || !supabase) return getSettledClaims();
+
+  try {
+    const { data, error } = await supabase
+      .from('claims')
+      .select('*')
+      .eq('status', 'SETTLED')
+      .order('created_at', { ascending: false });
+
+    if (!error && data && data.length > 0) {
+      const mapped = data.map((c) => ({
+        id: c.id,
+        hospitalName: c.hospital_name,
+        payee: c.hospital_address,
+        amountEth: parseFloat(c.amount_eth),
+        amountInr: c.amount_inr,
+        nullifier: c.nullifier,
+        status: 'VERIFIED VALID',
+        timestamp: new Date(c.created_at).toLocaleTimeString(),
+        txHash: c.tx_hash,
+      }));
+      const local = getSettledClaims();
+      const ids = new Set(mapped.map((m) => m.id));
+      const combined = [...mapped, ...local.filter((l) => !ids.has(l.id))];
+      saveSettledClaims(combined);
+      return combined;
+    }
+  } catch (err) {}
+  return getSettledClaims();
+}
+
 export function addSettledClaim(claim) {
   const existing = getSettledClaims();
   const updated = [claim, ...existing.filter((c) => c.id !== claim.id)];
   saveSettledClaims(updated);
+
+  // Mark settled in Supabase Cloud
+  if (isSupabaseConfigured() && supabase) {
+    supabase
+      .from('claims')
+      .update({
+        status: 'SETTLED',
+        tx_hash: claim.txHash || claim.id,
+      })
+      .eq('id', claim.id)
+      .then(({ error }) => {
+        if (error) console.info('[Parda] Supabase settle sync:', error.message);
+      })
+      .catch(() => {});
+  }
+
   return updated;
 }
 
@@ -242,6 +355,42 @@ export function getStoredDoctorAccessGranted() {
 export function setStoredDoctorAccessGranted(val) {
   if (typeof window === 'undefined') return;
   localStorage.setItem(STORAGE_KEYS.ACCESS_GRANTED, val ? 'true' : 'false');
+
+  if (isSupabaseConfigured() && supabase) {
+    supabase
+      .from('access_grants')
+      .upsert({
+        id: 'grant-alex-doe',
+        patient_address: '0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc',
+        hospital_name: 'St. Jude Medical Center',
+        status: val ? 'ACTIVE' : 'REVOKED',
+        updated_at: new Date().toISOString(),
+      })
+      .then(({ error }) => {
+        if (error) console.info('[Parda] Supabase grant sync:', error.message);
+      })
+      .catch(() => {});
+  }
+}
+
+export async function fetchDoctorAccessFromCloud() {
+  if (typeof window === 'undefined') return getStoredDoctorAccessGranted();
+  if (!isSupabaseConfigured() || !supabase) return getStoredDoctorAccessGranted();
+
+  try {
+    const { data, error } = await supabase
+      .from('access_grants')
+      .select('status')
+      .eq('id', 'grant-alex-doe')
+      .maybeSingle();
+
+    if (!error && data) {
+      const isGranted = data.status === 'ACTIVE';
+      setStoredDoctorAccessGranted(isGranted);
+      return isGranted;
+    }
+  } catch (e) {}
+  return getStoredDoctorAccessGranted();
 }
 
 export function getSelectedDelegatedHospital() {

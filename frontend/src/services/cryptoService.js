@@ -53,6 +53,42 @@ export async function generatePatientKey() {
 }
 
 /**
+ * Deterministically derives an AES-256-GCM CryptoKey from a patient's sovereign identity
+ * (wallet address or seed) using PBKDF2 (100,000 rounds of SHA-256).
+ * Ensures that ANY device (laptop, phone, tablet) logging into the account derives
+ * the exact same cryptographic key to decrypt records fetched from Supabase.
+ * 
+ * @param {string} patientAddress - The patient's Ethereum wallet address or identity
+ * @returns {Promise<CryptoKey>}
+ */
+export async function derivePatientKeyFromIdentity(patientAddress) {
+  const enc = new TextEncoder();
+  const normalized = (patientAddress || '0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc').toLowerCase();
+  const salt = enc.encode('parda-sovereign-vault-v1-salt');
+
+  const keyMaterial = await window.crypto.subtle.importKey(
+    'raw',
+    enc.encode(normalized),
+    'PBKDF2',
+    false,
+    ['deriveKey']
+  );
+
+  return await window.crypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2',
+      salt,
+      iterations: 100000,
+      hash: 'SHA-256',
+    },
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
+    true,
+    ['encrypt', 'decrypt']
+  );
+}
+
+/**
  * Exports a CryptoKey to a portable Base64 key string.
  * @param {CryptoKey} key 
  * @returns {Promise<string>}

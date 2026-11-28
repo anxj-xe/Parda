@@ -6,6 +6,7 @@
 import { supabase, isSupabaseConfigured } from './supabaseClient';
 import {
   generatePatientKey,
+  derivePatientKeyFromIdentity,
   exportKeyToBase64,
   importKeyFromBase64,
   encryptHealthRecord,
@@ -16,12 +17,16 @@ const PATIENT_KEY_STORAGE_PREFIX = 'parda_patient_key_';
 const LOCAL_RECORD_STORAGE_PREFIX = 'parda_encrypted_record_';
 
 /**
- * Gets or creates a local AES-256-GCM encryption key for a given patient wallet.
+ * Gets or creates a sovereign AES-256-GCM encryption key for a given patient wallet.
+ * Uses deterministic derivation so that across multiple laptops/browsers,
+ * the patient reconstructs the EXACT same key to decrypt records from Supabase.
+ * 
  * @param {string} patientAddress 
  * @returns {Promise<{ key: CryptoKey, base64Key: string }>}
  */
 export async function getOrCreatePatientKey(patientAddress) {
-  const storageKey = PATIENT_KEY_STORAGE_PREFIX + (patientAddress ? patientAddress.toLowerCase() : 'default');
+  const normalizedAddr = patientAddress ? patientAddress.toLowerCase() : '0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc';
+  const storageKey = PATIENT_KEY_STORAGE_PREFIX + normalizedAddr;
   const existingBase64 = localStorage.getItem(storageKey);
 
   if (existingBase64) {
@@ -29,15 +34,24 @@ export async function getOrCreatePatientKey(patientAddress) {
       const key = await importKeyFromBase64(existingBase64);
       return { key, base64Key: existingBase64 };
     } catch (e) {
-      console.warn('[Parda] Corrupt key in storage, generating new key:', e);
+      console.warn('[Parda] Corrupt key in storage, regenerating:', e);
     }
   }
 
-  // Generate new 256-bit AES key
-  const newKey = await generatePatientKey();
-  const base64Key = await exportKeyToBase64(newKey);
-  localStorage.setItem(storageKey, base64Key);
-  return { key: newKey, base64Key };
+  // Derive deterministically so ANY device logging into this patient account
+  // can reconstruct the exact same key to decrypt the Supabase Cloud Vault ciphertext
+  try {
+    const key = await derivePatientKeyFromIdentity(normalizedAddr);
+    const base64Key = await exportKeyToBase64(key);
+    localStorage.setItem(storageKey, base64Key);
+    return { key, base64Key };
+  } catch (err) {
+    console.warn('[Parda] Fallback to random key generation:', err);
+    const newKey = await generatePatientKey();
+    const base64Key = await exportKeyToBase64(newKey);
+    localStorage.setItem(storageKey, base64Key);
+    return { key: newKey, base64Key };
+  }
 }
 
 /**
